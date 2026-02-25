@@ -105,7 +105,8 @@ def read_klines(
     if df.empty:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume", "dif", "dea", "macd"])
     df = df.rename(columns={"dt": "date"})
-    df["date"] = pd.to_datetime(df["date"])
+    # 尝试混合格式解析
+    df["date"] = pd.to_datetime(df["date"], format="mixed")
     return df
 
 
@@ -129,7 +130,7 @@ def save_klines(conn: sqlite3.Connection, df: pd.DataFrame, symbol: str, level: 
         """INSERT OR REPLACE INTO kline (symbol, level, dt, open, high, low, close, volume, dif, dea, macd)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         [
-            (symbol, level, r.dt, r.open, r.high, r.low, r.close, r.volume, r.dif, r.dea, r.macd)
+            (symbol, level, r['dt'], r['open'], r['high'], r['low'], r['close'], r['volume'], r['dif'], r['dea'], r['macd'])
             for _, r in df.iterrows()
         ],
     )
