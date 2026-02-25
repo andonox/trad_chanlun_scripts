@@ -14,6 +14,8 @@ __pycache__/
 
 # Data
 data/
+# Allow stock_kline.db
+!data/stock_kline.db
 log/
 
 # Outputs

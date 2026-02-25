@@ -289,63 +289,87 @@ def batch_fetch_stocks(codes: List[str], levels: List[str] = None,
     """
     批量获取多只股票数据
     使用Tushare批量接口
+    支持多级别: daily, 60, 30, 15, 5
     """
     results = []
     total = len(codes)
 
-    print(f"开始批量获取 {total} 只股票数据...")
+    print("开始批量获取 {} 只股票数据...".format(total))
     start_time = time.time()
 
-    # 默认只获取日线
+    # 默认获取日线和60分钟线
     if levels is None:
-        levels = ["daily"]
+        levels = ["daily", "60"]
 
-    # 只处理日线
-    if "daily" in levels:
-        # 分批获取，每批100只
-        for i in range(0, total, BATCH_SIZE):
-            batch_codes = codes[i:i + BATCH_SIZE]
-            batch_num = len(batch_codes)
+    # 处理每个级别
+    for level in levels:
+        print("\n=== 获取级别: {} ===".format(level))
+        level_start = time.time()
 
-            print(f"获取第 {i//BATCH_SIZE + 1} 批 ({batch_num} 只)...")
+        if level == "daily":
+            # 分批获取日线
+            for i in range(0, total, BATCH_SIZE):
+                batch_codes = codes[i:i + BATCH_SIZE]
+                batch_num = len(batch_codes)
 
-            # 批量获取
-            batch_data = fetch_batch_daily(batch_codes, num=300)
+                print("获取第 {} 批 ({} 只)...".format(i//BATCH_SIZE + 1, batch_num))
 
-            # 保存到数据库
-            conn = get_connection()
-            try:
-                init_db(conn)
-                saved_count = 0
+                batch_data = fetch_batch_daily(batch_codes, num=300)
 
-                for code, df in batch_data.items():
+                conn = get_connection()
+                try:
+                    init_db(conn)
+                    saved_count = 0
+
+                    for code, df in batch_data.items():
+                        if df is not None and not df.empty:
+                            save_klines(conn, df, code, "daily")
+                            saved_count += 1
+
+                    conn.commit()
+                    print("  成功: {}/{}".format(saved_count, batch_num))
+
+                except Exception as e:
+                    print("  保存失败: {}".format(e))
+                finally:
+                    conn.close()
+
+                if delay > 0 and i + BATCH_SIZE < total:
+                    time.sleep(delay)
+
+                elapsed = time.time() - start_time
+                completed = min(i + BATCH_SIZE, total)
+                print("进度: {}/{} ({:.1f}%), 耗时: {:.1f}s".format(completed, total, completed/total*100, elapsed))
+
+        else:
+            # 分钟线 - 逐只获取
+            success_count = 0
+            for i, code in enumerate(codes):
+                if (i + 1) % 100 == 0 or i == 0:
+                    print("进度: {}/{}".format(i+1, total))
+
+                try:
+                    df = fetch_stock_minute(code, level, num=500)
                     if df is not None and not df.empty:
-                        save_klines(conn, df, code, "daily")
-                        saved_count += 1
-                        results.append({"code": code, "success": True, "levels": {"daily": len(df)}})
-                    else:
-                        results.append({"code": code, "success": False, "levels": {"daily": 0}})
+                        conn = get_connection()
+                        try:
+                            init_db(conn)
+                            save_klines(conn, df, code, level)
+                            conn.commit()
+                            success_count += 1
+                        finally:
+                            conn.close()
+                except:
+                    pass
 
-                conn.commit()
-                print(f"  成功: {saved_count}/{batch_num}")
+                if delay > 0:
+                    time.sleep(delay)
 
-            except Exception as e:
-                print(f"  保存失败: {e}")
-            finally:
-                conn.close()
-
-            # 控制请求频率
-            if delay > 0 and i + BATCH_SIZE < total:
-                time.sleep(delay)
-
-            # 打印进度
-            elapsed = time.time() - start_time
-            completed = min(i + BATCH_SIZE, total)
-            print(f"进度: {completed}/{total} ({completed/total*100:.1f}%), 耗时: {elapsed:.1f}s")
+            print("{} 级别获取完成: {}/{}".format(level, success_count, total))
 
     elapsed = time.time() - start_time
-    success_count = sum(1 for r in results if r.get("success"))
-    print(f"数据获取完成! 总耗时: {elapsed:.1f}s, 成功: {success_count}/{total}")
+    success_count = len([r for r in results if r.get("success")])
+    print("\n数据获取完成! 总耗时: {:.1f}s".format(elapsed))
 
     return results
 
