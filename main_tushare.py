@@ -28,7 +28,7 @@ from data_fetcher_tushare import (
     get_kline_by_level,
     batch_fetch_stocks,
 )
-from chan_logic import filter_levels_third_buy, filter_levels_third_buy_with_detail, check_bottom_divergence
+from chan_logic import filter_levels_third_buy, filter_levels_third_buy_with_detail, check_bottom_divergence, calculate_divergence_strength
 from kline_db import checkpoint as db_checkpoint, get_connection, init_db
 
 
@@ -62,15 +62,8 @@ def get_stock_names(codes: List[str]) -> Dict[str, str]:
         ts.set_token(TUSHARE_TOKEN)
         pro = ts.pro_api()
 
-        # 批量获取
-        tscodes = []
-        for c in codes:
-            if c.startswith('6'):
-                tscodes.append(f"{c}.SH")
-            else:
-                tscodes.append(f"{c}.SZ")
-
-        df = pro.stock_basic(ts_code=",".join(tscodes[:100]), fields='ts_code,name')
+        # 一次性获取所有上市股票
+        df = pro.stock_basic(list_status='L', fields='ts_code,name')
         if df is None or df.empty:
             return {}
 
@@ -86,8 +79,7 @@ def get_stock_list(limit: Optional[int] = None) -> pd.DataFrame:
     df = generate_stock_list(limit)
 
     # 尝试获取股票名称
-    codes = df['代码'].tolist()[:500]  # 限制数量
-    names = get_stock_names(codes)
+    names = get_stock_names(df['代码'].tolist())
 
     if names:
         df['名称'] = df['代码'].map(lambda x: names.get(x, x))
@@ -186,12 +178,15 @@ def run(
 
         # 分析底背驰
         bottom_div_levels = []
+        div_scores = {}
         for lev in levels:
             df = kline_by_level.get(lev)
             if df is not None:
-                div_result = check_bottom_divergence(df)
-                if div_result.get("存在底背驰"):
+                # 计算底背驰力度
+                strength = calculate_divergence_strength(df)
+                if strength.get("有底背驰"):
                     bottom_div_levels.append(lev)
+                    div_scores[lev] = strength
 
         # 记录第三买点
         for lev in third_buy_levels:
@@ -201,18 +196,25 @@ def run(
                 "级别": lev,
                 "级别说明": level_display_name(lev),
                 "类型": "第三买点",
+                "力度评分": 100,
+                "预估上涨概率": "极高",
+                "预估上涨力度": "强劲",
             })
 
         # 记录底背驰（不重复）
         existing_codes = set((r["股票代码"], r["级别"]) for r in results)
         for lev in bottom_div_levels:
             if (code, lev) not in existing_codes:
+                strength = div_scores.get(lev, {})
                 results.append({
                     "股票代码": code,
                     "股票名称": name,
                     "级别": lev,
                     "级别说明": level_display_name(lev),
                     "类型": "底背驰",
+                    "力度评分": strength.get("力度评分", 0),
+                    "预估上涨概率": strength.get("预估上涨概率", ""),
+                    "预估上涨力度": strength.get("预估上涨力度", ""),
                 })
 
         if third_buy_levels or bottom_div_levels:
@@ -225,6 +227,16 @@ def run(
 
     # 输出结果
     out_df = pd.DataFrame(results)
+
+    # 按力度评分排序
+    if not out_df.empty:
+        # 确保评分列是数值类型
+        out_df["力度评分"] = pd.to_numeric(out_df["力度评分"], errors='coerce').fillna(0)
+        # 排序：第三买点在先，然后按评分降序
+        out_df["排序权重"] = out_df["类型"].apply(lambda x: 1 if x == "第三买点" else 0)
+        out_df = out_df.sort_values(by=["排序权重", "力度评分"], ascending=[False, False])
+        out_df = out_df.drop(columns=["排序权重"])
+
     if output_csv:
         out_df.to_csv(output_csv, index=False, encoding="utf-8-sig")
         print(f"\n结果已保存: {output_csv}")
