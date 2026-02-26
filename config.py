@@ -25,3 +25,7 @@ load_env()
 
 # Tushare配置
 TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "")
+
+# MiniMax配置
+MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
+MINIMAX_BASE_URL = os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.chat/v1")

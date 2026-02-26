@@ -28,7 +28,7 @@ from data_fetcher_tushare import (
     get_kline_by_level,
     batch_fetch_stocks,
 )
-from chan_logic import filter_levels_third_buy, filter_levels_third_buy_with_detail
+from chan_logic import filter_levels_third_buy, filter_levels_third_buy_with_detail, check_bottom_divergence
 from kline_db import checkpoint as db_checkpoint, get_connection, init_db
 
 
@@ -54,9 +54,45 @@ def generate_stock_list(limit: Optional[int] = None) -> pd.DataFrame:
     return df
 
 
+def get_stock_names(codes: List[str]) -> Dict[str, str]:
+    """从Tushare获取股票名称"""
+    try:
+        import tushare as ts
+        from config import TUSHARE_TOKEN
+        ts.set_token(TUSHARE_TOKEN)
+        pro = ts.pro_api()
+
+        # 批量获取
+        tscodes = []
+        for c in codes:
+            if c.startswith('6'):
+                tscodes.append(f"{c}.SH")
+            else:
+                tscodes.append(f"{c}.SZ")
+
+        df = pro.stock_basic(ts_code=",".join(tscodes[:100]), fields='ts_code,name')
+        if df is None or df.empty:
+            return {}
+
+        return dict(zip([str(x['ts_code'])[:6] for x in df.to_dict('records')],
+                      [x['name'] for x in df.to_dict('records')]))
+    except Exception as e:
+        print("获取股票名称失败: {}".format(e))
+        return {}
+
+
 def get_stock_list(limit: Optional[int] = None) -> pd.DataFrame:
     """获取A股股票列表（代码、名称）"""
-    return generate_stock_list(limit)
+    df = generate_stock_list(limit)
+
+    # 尝试获取股票名称
+    codes = df['代码'].tolist()[:500]  # 限制数量
+    names = get_stock_names(codes)
+
+    if names:
+        df['名称'] = df['代码'].map(lambda x: names.get(x, x))
+
+    return df
 
 
 def level_display_name(level: str) -> str:
@@ -144,19 +180,48 @@ def run(
         for lev in levels:
             kline_by_level[lev] = get_kline_by_level(code, lev, months=months)
 
-        # 分析
+        # 分析第三买点
         detail_list = filter_levels_third_buy_with_detail(kline_by_level, levels)
-        hit_levels = [lev for lev, _, passed in detail_list if passed]
+        third_buy_levels = [lev for lev, _, passed in detail_list if passed]
 
-        if hit_levels:
-            for lev in hit_levels:
+        # 分析底背驰
+        bottom_div_levels = []
+        for lev in levels:
+            df = kline_by_level.get(lev)
+            if df is not None:
+                div_result = check_bottom_divergence(df)
+                if div_result.get("存在底背驰"):
+                    bottom_div_levels.append(lev)
+
+        # 记录第三买点
+        for lev in third_buy_levels:
+            results.append({
+                "股票代码": code,
+                "股票名称": name,
+                "级别": lev,
+                "级别说明": level_display_name(lev),
+                "类型": "第三买点",
+            })
+
+        # 记录底背驰（不重复）
+        existing_codes = set((r["股票代码"], r["级别"]) for r in results)
+        for lev in bottom_div_levels:
+            if (code, lev) not in existing_codes:
                 results.append({
                     "股票代码": code,
                     "股票名称": name,
                     "级别": lev,
                     "级别说明": level_display_name(lev),
+                    "类型": "底背驰",
                 })
-            print(f"  {code} 符合: {', '.join(level_display_name(l) for l in hit_levels)}")
+
+        if third_buy_levels or bottom_div_levels:
+            info = []
+            if third_buy_levels:
+                info.append("3买:" + ",".join(level_display_name(l) for l in third_buy_levels))
+            if bottom_div_levels:
+                info.append("底背:" + ",".join(level_display_name(l) for l in bottom_div_levels))
+            print(f"  {code} 符合: {', '.join(info)}")
 
     # 输出结果
     out_df = pd.DataFrame(results)
@@ -191,7 +256,7 @@ def main():
     if args.codes:
         stock_codes = [c.strip() for c in args.codes.split(",") if c.strip()]
 
-    default_output = f"third_buy_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    default_output = f"signal_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
     output = args.output or default_output
 
     start_time = time.time()

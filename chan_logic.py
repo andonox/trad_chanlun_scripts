@@ -238,3 +238,106 @@ def filter_levels_third_buy_with_detail(
         )
         out.append((level, detail, detail["结论"]))
     return out
+
+
+# ========== 底背驰判断 ==========
+
+def check_bottom_divergence(df: pd.DataFrame, lookback: int = 20) -> Dict[str, Any]:
+    """
+    底背驰判断（MACD底背驰）：
+    1. 价格创新低（最近低点比之前的低点低）
+    2. MACD/DIF没有创新低，反而比之前高
+
+    返回: {
+        "存在底背驰": bool,
+        "价格新低": float,
+        "MACD新低": float,
+        "原因": []
+    }
+    """
+    result = {
+        "存在底背驰": False,
+        "价格新低": None,
+        "DIF新低": None,
+        "MACD新低": None,
+        "原因": []
+    }
+
+    if df is None or len(df) < 30:
+        result["原因"].append("K线不足")
+        return result
+
+    # 需要MACD数据
+    if "dif" not in df.columns or "dea" not in df.columns:
+        result["原因"].append("无MACD数据")
+        return result
+
+    df = df.tail(lookback).copy()
+
+    # 找最近的低点（最小收盘价对应的索引）
+    close = df["close"].values
+    low = df["low"].values
+    dif = df["dif"].values
+    macd = df["macd"].values if "macd" in df.columns else (dif - df["dea"].values)
+
+    n = len(close)
+
+    # 找最近的低点位置
+    min_price_idx = n - 1  # 默认最后一个
+    for i in range(n - 1, -1, -1):
+        if low[i] == min(low):
+            min_price_idx = i
+            break
+
+    # 找之前一个低点（用于比较）
+    if min_price_idx < 3:
+        result["原因"].append("需要更多历史数据找前低")
+        return result
+
+    # 前低：取min_price_idx之前的最低点
+    prev_low_idx = 0
+    prev_low_price = float('inf')
+    for i in range(min_price_idx):
+        if low[i] < prev_low_price:
+            prev_low_price = low[i]
+            prev_low_idx = i
+
+    # 比较价格
+    current_low = low[min_price_idx]
+    prev_low = prev_low_price
+
+    if current_low >= prev_low:
+        result["原因"].append("价格未创新低")
+        return result
+
+    result["价格新低"] = round(current_low, 2)
+    result["前低位置价格"] = round(prev_low, 2)
+
+    # MACD比较：用DIF或MACD
+    # 当前低点的DIF
+    current_dif = dif[min_price_idx]
+    # 前低位置的DIF
+    prev_dif = dif[prev_low_idx]
+
+    if current_dif >= prev_dif:
+        result["存在底背驰"] = True
+        result["DIF新低"] = round(current_dif, 4)
+        result["前低位置DIF"] = round(prev_dif, 4)
+    else:
+        # 也检查MACD柱子
+        current_macd = macd[min_price_idx]
+        prev_macd = macd[prev_low_idx]
+
+        if current_macd >= prev_macd:
+            result["存在底背驰"] = True
+            result["MACD新低"] = round(current_macd, 4)
+            result["前低位置MACD"] = round(prev_macd, 4)
+        else:
+            result["原因"].append("MACD也创新低，无背驰")
+
+    return result
+
+
+def check_bottom_divergence_simple(df: pd.DataFrame) -> bool:
+    """简化版底背驰判断"""
+    return check_bottom_divergence(df)["存在底背驰"]
